@@ -5,7 +5,7 @@ inspired by an amazon test
 The overall idea is to make a very scalable algorithm being able to process an huge quantity of very huge similar fies
 reducing as much as possible file IO while not being able to access CRCs directly from disk (which otherwise would make things easier ) ...
 
-so .. we collect files in a Set and don't really care about which kind .. ( this a sort of trash can / queue ) 
+so .. we collect files in a SortedSet (we don't really care about which of set here .. this is just a sort of trash can / queue ) 
 cause we focus on the really important issue here ..
 having an huge ammount of quasi identical huge files while in fact different and with chances to make HASH collision anyway ...
 
