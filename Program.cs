@@ -2,27 +2,63 @@
 using System.IO;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Security.Cryptography;
+using System.Collections;
 
 namespace SearchSameFiles                                                   {
     class                               Program                             {
 
-        //TODO: by using our own tree instead , we can further optimizate it by avoid unecessary read on files by sparse reading
+        //TODO: by using our own tree instead , we can further optimizate it by avoid unecessary read on files by sparse reading 
         //      we may also implement equality by similar content instead of just identical
-        SortedSet<FileDesc>             sortedFiles                         = new SortedSet<FileDesc>(new FileComparer());
-
-        private class                   FileDesc                            {
-            FileInfo    fileInfo;
-            long?       sortChunk;      // for further optimization reading pseudo random chuncks (sparse)
-            long?       checkPos;       // if they are same size we use this as
-            byte?       lastCheck;
+        SortedSet<FileDesc>             sortedFiles                         = new SortedSet<FileDesc>(new FileComparer(new SameLengthFileList()));
 
 
-            public                      FileDesc                            (string file)                                                   {
-                fileInfo = new FileInfo(file);
+        private class                   ChunkDigest                         {
+            static SHA1Managed          algo = new SHA1Managed();
+            byte[]                      digest;
 
+            internal void update(byte[] buff)   {
+                digest=algo.ComputeHash(buff);
             }
 
-            internal long               len                                 ()                                                              {
+            internal bool compare(ChunkDigest chunkDigest)  {
+                return StructuralComparisons.StructuralEqualityComparer.Equals(digest,chunkDigest.digest);
+            }
+
+            //TODO:    complete this
+
+        }
+
+        private class                   SameLengthFileList                  {
+            List<FileDesc>              sameLengthFiles = new List<FileDesc>();
+            internal int                add                                 (FileDesc a,FileDesc b)                                         {
+                Log.dbg("add: {0} - {1}", a, b);
+                insert(a);
+                insert(b);
+                return 0;// anyway 
+            }
+
+            private void insert(FileDesc x) {
+               // sameLengthFiles.Add(x);
+            }
+        }
+
+        private class                   FileDesc                            {
+            FileInfo                    fileInfo;
+            long?                       checkPos;       // we will use this as index of where comparison failed , (not necesarely the position from the begining (sparse search))
+            byte?                       lastCheck;      // this is the first char wich differs we got .. (so .. checkPos+lastCheck are then use for sort files )
+            ChunkDigest[]               digestMap;      // we'll optimize this later .. an array it's ok to begin with , will be also faster in case of sparse chunks check
+
+            public FileDesc(string file)            {
+                fileInfo = new FileInfo(file);
+            }
+            public override string ToString()         {
+                return "FileDesc: " + fileInfo.Name;
+            }
+
+        
+
+        internal long               len                                 ()                                                              {
                 return fileInfo.Length;
             }
 
@@ -39,7 +75,7 @@ namespace SearchSameFiles                                                   {
 
                     //TODO: use here previously stored compare states
 
-                    long pos = 0;
+                    long pos = 0; 
 
                     FileStream fsA  = fileInfo.OpenRead();
                     FileStream fsB  = b.fileInfo.OpenRead();
@@ -47,13 +83,28 @@ namespace SearchSameFiles                                                   {
                     byte[] buffB    = new byte[chunkSzMax];
                     int res         = 0; // assume identical files
                     int i           = 0;
+                    int chunkIndx   = 0;
+                    long numChunks = fLen / chunkSzMax + 1;
+                    if (digestMap==null)        digestMap = new ChunkDigest[numChunks];
+                    if (b.digestMap == null)    b.digestMap = new ChunkDigest[numChunks];
                     while (pos < fLen) {
 
                         long remain = fLen - pos;
                         int chunkSz = remain > chunkSzMax ? chunkSzMax : (int)remain;
+
+                        if (haveDifferentDigest(chunkIndx,b) ) {
+                            // having a different digest means they are different for sure so we don't have to bother going on
+                            // however we have to store correctly the state for the state here
+                            Log.dbg("different digest: {0} <> {1} chunk: ", fileInfo.Name, b.fileInfo.Name,chunkIndx);
+                            return -666;
+                        }
+
                         int doneA = fsA.Read(buffA, 0, chunkSz);
                         int doneB = fsB.Read(buffB, 0, chunkSz);
                         //TODO: make sure read completed full chunk
+                        //****    
+                        setChunkDigest(chunkIndx, buffA);
+                        b.setChunkDigest(chunkIndx, buffB);
                         for (i = 0; i < chunkSz; i++) {
                             int diff = buffA[i] - buffB[i];
                             if (diff < 0) {
@@ -66,13 +117,27 @@ namespace SearchSameFiles                                                   {
                             }
                         }
                         pos += chunkSz;
+                        chunkIndx++;
                     }
                     endScan: // they are different
 
                     storeState(b, pos + i, buffA[i], buffB[i]);
                     if (res==0) Log.dbg("identical: {0} = {1}", fileInfo.Name, b.fileInfo.Name);
-                    else        Log.dbg("different: at {0}  {1} != {2}",pos , buffA[i],buffB[i]);
+                    else        Log.dbg("different: at {0}  {1} != {2}",pos+i , buffA[i],buffB[i]);
                     return res;
+                }
+            }
+
+            private bool haveDifferentDigest(int idx,FileDesc b) { // different or uncomputed
+                return (digestMap[idx]!=null && b.digestMap[idx]!=null && !digestMap[idx].compare(b.digestMap[idx]));
+            }
+
+            private void setChunkDigest(int chunkIndx, byte[] buff)          {
+                if (digestMap[chunkIndx] == null) {
+                    //Log.dbg("setChunkDigest::{0} : {1}", this, chunkIndx);
+                    ChunkDigest digest = new ChunkDigest();
+                    digest.update(buff);
+                    digestMap[chunkIndx] = digest;
                 }
             }
 
@@ -83,19 +148,31 @@ namespace SearchSameFiles                                                   {
                 b.lastCheck = v2;
 
             }
+
         }
 
-        private class                   FileComparer
+        private class                   FileComparer 
             :                           IComparer<FileDesc>                                                                                 {
+            private SameLengthFileList sameLengthFileList;
+
+            public FileComparer(SameLengthFileList sorter)     {
+                sameLengthFileList = sorter;
+            }
+
             public int Compare([AllowNull] FileDesc a, [AllowNull] FileDesc b)  {
                 int map  = a == null? 1: 0;
                     map += b == null? 2: 0;
 
                 switch (map) {
-                    case 1:     return -1;
-                    case 2:     return +1;
+                    case 1:     return -1;                                  
+                    case 2:     return +1;                                  
                     case 3:     return  0;              // same NULL
-                    default:    return a.compare(b);
+                    default:
+                                int res=a.compare(b);
+                                // we tell they are equal and sort them inside , we don't really care about overall different size order
+                                if (res==0) sameLengthFileList.add(a,b);
+                                return res;
+                                
                 }
             }
         }
