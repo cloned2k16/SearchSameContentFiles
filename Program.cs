@@ -32,7 +32,7 @@ namespace SearchSameFiles                                                   {
         private class                   SameLengthFileList                  {
             List<FileDesc>              sameLengthFiles = new List<FileDesc>();
             internal int                add                                 (FileDesc a,FileDesc b)                                         {
-                Log.dbg("add: {0} - {1}", a, b);
+                //Log.dbg("add: {0} - {1}", a, b);
                 insert(a);
                 insert(b);
                 return 0;// anyway 
@@ -48,17 +48,20 @@ namespace SearchSameFiles                                                   {
             long?                       checkPos;       // we will use this as index of where comparison failed , (not necesarely the position from the begining (sparse search))
             byte?                       lastCheck;      // this is the first char wich differs we got .. (so .. checkPos+lastCheck are then use for sort files )
             ChunkDigest[]               digestMap;      // we'll optimize this later .. an array it's ok to begin with , will be also faster in case of sparse chunks check
+            ISparseSeekHandler          seekHandler;   // drives sparse lookup ..
 
-            public FileDesc(string file)            {
-                fileInfo = new FileInfo(file);
+            public                      FileDesc                            (FileInfo fileInfo, ISparseSeekHandler seekHandler)             {
+                this.fileInfo       =   fileInfo;
+                this.seekHandler    =   seekHandler;
+                
             }
-            public override string ToString()         {
-                return "FileDesc: " + fileInfo.Name;
+            public override string      ToString                            ()                                                              {
+                return this.GetType().Name+": " + fileInfo.Name;
             }
 
         
 
-        internal long               len                                 ()                                                              {
+            internal long               len                                 ()                                                              {
                 return fileInfo.Length;
             }
 
@@ -71,7 +74,7 @@ namespace SearchSameFiles                                                   {
                 else  {
                     Log.dbg("compare same length: [{0} - {1}]", fileInfo.Name, b.fileInfo.Name);
 
-                    int chunkSzMax = 4096; //TODO: chose most efficient disk read size here !!
+                    int chunkSzMax = seekHandler.getChunkSize();            //TODO: chose most efficient disk read size here !!
 
                     //TODO: use here previously stored compare states
 
@@ -84,8 +87,8 @@ namespace SearchSameFiles                                                   {
                     int res         = 0; // assume identical files
                     int i           = 0;
                     int chunkIndx   = 0;
-                    long numChunks = fLen / chunkSzMax + 1;
-                    if (digestMap==null)        digestMap = new ChunkDigest[numChunks];
+                    int numChunks   = seekHandler.getNumChunks();
+                    if (digestMap==null)        digestMap   = new ChunkDigest[numChunks];
                     if (b.digestMap == null)    b.digestMap = new ChunkDigest[numChunks];
                     while (pos < fLen) {
 
@@ -120,6 +123,8 @@ namespace SearchSameFiles                                                   {
                         chunkIndx++;
                     }
                     endScan: // they are different
+                    fsA.Close();
+                    fsB.Close();
 
                     storeState(b, pos + i, buffA[i], buffB[i]);
                     if (res==0) Log.dbg("identical: {0} = {1}", fileInfo.Name, b.fileInfo.Name);
@@ -128,11 +133,11 @@ namespace SearchSameFiles                                                   {
                 }
             }
 
-            private bool haveDifferentDigest(int idx,FileDesc b) { // different or uncomputed
+            private bool                haveDifferentDigest                 (int idx,FileDesc b)                                            { // different or uncomputed
                 return (digestMap[idx]!=null && b.digestMap[idx]!=null && !digestMap[idx].compare(b.digestMap[idx]));
             }
 
-            private void setChunkDigest(int chunkIndx, byte[] buff)          {
+            private void                setChunkDigest                      (int chunkIndx, byte[] buff)                                    {
                 if (digestMap[chunkIndx] == null) {
                     //Log.dbg("setChunkDigest::{0} : {1}", this, chunkIndx);
                     ChunkDigest digest = new ChunkDigest();
@@ -177,9 +182,9 @@ namespace SearchSameFiles                                                   {
             }
         }
 
-        private void                    treeAdd                             (string fName)                                                  {
-            Log.dbg("adding file: {0}", fName);
-            sortedFiles.Add(new FileDesc(fName));
+        private void                    treeAdd                             (string fName, ISparseSeekProvider seekProvider)                {
+            FileInfo fi = new FileInfo(fName);
+            sortedFiles.Add(new FileDesc(fi,seekProvider.getSeekHandler(fi)));
         }
 
         private List<List<FileDesc>>    collectSame                         (SortedSet<FileDesc> sortedFiles)                               {
@@ -187,28 +192,20 @@ namespace SearchSameFiles                                                   {
             return null;
         }
 
-        private List<List<FileDesc>>    findDuplicates                      (string[] files)                                                {
-            Log.dbg("found {0} files ..", files.Length);
+        private List<List<FileDesc>>    findDuplicates                      (string[] files, ISparseSeekProvider seekProvider)              {
+            //Log.dbg("found {0} files ..", files.Length);
             foreach(string fName in files) {
-                treeAdd(fName);
+                treeAdd(fName, seekProvider);
             }
             return collectSame(sortedFiles);
         }
 
-        class                           Log                                 {
-            internal static void dbg(String fmt, params object[] args)  {
-                Console.WriteLine(fmt, args);
-            }
-            internal static void err(String fmt, params object[] args)  {
-                Console.WriteLine("ERROR: " + fmt, args);
-            }
-        }
 
-        private void                    run                                 (string path,string filter)                                     {
+        private void                    run                                 (string path,string filter, ISparseSeekProvider seekProvider)   {
             try {
                 Log.dbg("running: {0} on {1} filter: {2}", this,path,filter);
                 string[] files = Directory.GetFiles(path);
-                findDuplicates(files);
+                findDuplicates(files, seekProvider);
             }
             catch (Exception e)  {
                 Log.err("Exception: {0}", e.Message);
@@ -217,7 +214,25 @@ namespace SearchSameFiles                                                   {
         }
 
         static void                     Main                                (string[] args)                                                 {
-                new Program().run("/___NODE/niMan", "");
+            int     min = 1
+                ,   max = 666
+                ;
+            string  sampleFolderName    = "/___NODE/niMan";
+            string  sampleFileFilter    = "";
+            string  sampleFileName      = sampleFolderName+"/demo.gif";
+
+
+            TestSeekProvider.test(typeof(BrokenSeekHandler)     , sampleFileName, min, max,TestForFailure.NO_SEEK);
+            TestSeekProvider.test(typeof(LinearSeekProvider)    , sampleFileName, min, max);
+            TestSeekProvider.test(typeof(ZigZagSeekProvider)    , sampleFileName, min, max);
+            TestSeekProvider.test(typeof(HopperSeekProvider)   , sampleFileName, min, max);
+
+            new Program().run(sampleFolderName, sampleFileFilter, new HopperSeekProvider(4096));
         }
+
+
     }
+
+
+
 }
